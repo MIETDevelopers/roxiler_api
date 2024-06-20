@@ -1,62 +1,63 @@
-from flask import Flask, jsonify, request
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import or_
+from flask import Flask, request, jsonify
+import sqlite3
+from datetime import datetime
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///sales.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
+DATABASE = 'sales.db'
 
-class ProductTransaction(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(100), nullable=False)
-    description = db.Column(db.String(200), nullable=True)
-    price = db.Column(db.Float, nullable=False)
-    date_of_transaction = db.Column(db.DateTime, nullable=False)
+def get_db():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-@app.before_first_request
-def setup_db():
-    db.create_all()
+@app.route('/api/statistics', methods=['GET'])
+def get_statistics():
+    month = request.args.get('month')
+    year = request.args.get('year')
 
-@app.route('/transactions', methods=['GET'])
-def get_transactions():
-    search = request.args.get('search', '')
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 10, type=int)
+    if not month or not year:
+        return jsonify({'error': 'Month and year are required parameters'}), 400
 
-    query = ProductTransaction.query
+    try:
+        start_date = datetime.strptime(f'{year}-{month}-01', '%Y-%m-%d')
+        end_date = datetime.strptime(f'{year}-{int(month)+1}-01', '%Y-%m-%d')
+    except ValueError:
+        return jsonify({'error': 'Invalid month or year format'}), 400
 
-    if search:
-        search = f'%{search}%'
-        query = query.filter(
-            or_(
-                ProductTransaction.title.ilike(search),
-                ProductTransaction.description.ilike(search),
-                ProductTransaction.price.ilike(search)
-            )
-        )
+    db = get_db()
+    cursor = db.cursor()
 
-    transactions = query.paginate(page=page, per_page=per_page, error_out=False)
+  
+    cursor.execute("""
+        SELECT SUM(amount) AS total_sales 
+        FROM sales 
+        WHERE sold_date >= ? AND sold_date < ? AND sold = 1
+    """, (start_date, end_date))
+    total_sales = cursor.fetchone()['total_sales'] or 0
 
-    data = [
-        {
-            'id': transaction.id,
-            'title': transaction.title,
-            'description': transaction.description,
-            'price': transaction.price,
-            'date_of_transaction': transaction.date_of_transaction.strftime('%Y-%m-%d %H:%M:%S')
-        } for transaction in transactions.items
-    ]
+  
+    cursor.execute("""
+        SELECT COUNT(*) AS total_sold 
+        FROM sales 
+        WHERE sold_date >= ? AND sold_date < ? AND sold = 1
+    """, (start_date, end_date))
+    total_sold = cursor.fetchone()['total_sold']
 
-    response = {
-        'total': transactions.total,
-        'pages': transactions.pages,
-        'page': transactions.page,
-        'per_page': transactions.per_page,
-        'data': data
-    }
+   
+    cursor.execute("""
+        SELECT COUNT(*) AS total_not_sold 
+        FROM sales 
+        WHERE sold_date >= ? AND sold_date < ? AND sold = 0
+    """, (start_date, end_date))
+    total_not_sold = cursor.fetchone()['total_not_sold']
 
-    return jsonify(response)
+    db.close()
+
+    return jsonify({
+        'total_sales': total_sales,
+        'total_sold': total_sold,
+        'total_not_sold': total_not_sold
+    })
 
 if __name__ == '__main__':
     app.run(debug=True)
